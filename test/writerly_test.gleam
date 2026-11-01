@@ -1,6 +1,7 @@
 import dirtree.{Dirpath, Filepath} as _dt
 import gleam/list
 import gleam/option.{Some}
+import gleam/result
 import gleam/string
 import gleeunit
 import gleeunit/should
@@ -64,8 +65,35 @@ fn attr_pairs(attrs: List(Attr)) -> List(#(String, String)) {
   list.map(attrs, fn(attr) { #(attr.key, attr.val) })
 }
 
+fn test1_sources() -> List(wl.SourceFile) {
+  [wl.SourceFile("test1.wly", "|> Book\n    bob=2\n    cuchua\n")]
+}
+
+fn test_a_sources() -> List(wl.SourceFile) {
+  [
+    wl.SourceFile("childA.wly", "It was a dark and stormy night."),
+    wl.SourceFile("__parent.wly", "|> Book\n    a=b"),
+  ]
+}
+
+fn assembled_paths(
+  sources: List(wl.SourceFile),
+  path_selector: fn(String) -> Bool,
+) -> Result(List(String), wl.AssemblyError) {
+  wl.assemble_sources_with_path_selector("root", sources, path_selector)
+  |> result.map(fn(assembled) {
+    let #(_tree, lines) = assembled
+    lines
+    |> list.map(fn(line) {
+      let assert Src(path: path, ..) = line.blame
+      path
+    })
+    |> list.unique
+  })
+}
+
 pub fn assembler_reads_a_single_file_with_relative_blame_paths_test() {
-  wl.assemble_input_lines("test/test1.wly")
+  wl.assemble_sources("test", test1_sources())
   |> should.equal(
     Ok(
       #(Dirpath("test", [Filepath("test1.wly")]), [
@@ -79,7 +107,7 @@ pub fn assembler_reads_a_single_file_with_relative_blame_paths_test() {
 }
 
 pub fn assembler_nests_child_files_below_the_parent_document_test() {
-  wl.assemble_input_lines("test/testA")
+  wl.assemble_sources("test/testA", test_a_sources())
   |> should.equal(
     Ok(
       #(
@@ -96,6 +124,55 @@ pub fn assembler_nests_child_files_below_the_parent_document_test() {
       ),
     ),
   )
+}
+
+pub fn assembler_result_does_not_depend_on_source_order_test() {
+  wl.assemble_sources("test/testA", list.reverse(test_a_sources()))
+  |> should.equal(wl.assemble_sources("test/testA", test_a_sources()))
+}
+
+pub fn assembler_ignores_commented_and_non_wly_paths_test() {
+  [
+    wl.SourceFile("__parent.wly", "|> Book"),
+    wl.SourceFile("a.wly", "a"),
+    wl.SourceFile("#draft.wly", "draft"),
+    wl.SourceFile("#old/b.wly", "old"),
+    wl.SourceFile("notes.txt", "notes"),
+  ]
+  |> assembled_paths(fn(_) { True })
+  |> should.equal(Ok(["__parent.wly", "a.wly"]))
+}
+
+pub fn assembler_keeps_parents_of_selected_files_test() {
+  [
+    wl.SourceFile("__parent.wly", "|> Book"),
+    wl.SourceFile("ch1/__parent.wly", "|> Chapter"),
+    wl.SourceFile("ch1/part1.wly", "one"),
+    wl.SourceFile("ch1/part2.wly", "two"),
+    wl.SourceFile("ch2/__parent.wly", "|> Chapter"),
+    wl.SourceFile("ch2/part1.wly", "three"),
+  ]
+  |> assembled_paths(fn(path) { path == "ch1/part2.wly" })
+  |> should.equal(Ok(["__parent.wly", "ch1/__parent.wly", "ch1/part2.wly"]))
+}
+
+pub fn assembler_requires_a_direct_wly_file_test() {
+  [wl.SourceFile("sub/a.wly", "a"), wl.SourceFile("#b.wly", "b")]
+  |> wl.assemble_sources("book", _)
+  |> should.equal(Error(wl.NoFilesFound("no direct .wly files found in: book")))
+}
+
+pub fn assembler_rejects_invalid_and_duplicate_paths_test() {
+  ["", "/abs.wly", "a//b.wly", "./a.wly", "sub/../a.wly", "sub/"]
+  |> list.each(fn(path) {
+    [wl.SourceFile("a.wly", "a"), wl.SourceFile(path, "x")]
+    |> wl.assemble_sources("book", _)
+    |> should.equal(Error(wl.InvalidSourcePath(path)))
+  })
+
+  [wl.SourceFile("a.wly", "a"), wl.SourceFile("a.wly", "b")]
+  |> wl.assemble_sources("book", _)
+  |> should.equal(Error(wl.DuplicateSourcePath("a.wly")))
 }
 
 pub fn parser_builds_a_tag_with_an_attribute_test() {
@@ -138,7 +215,7 @@ pub fn attribute_values_preserve_leading_and_trim_trailing_whitespace_test() {
 }
 
 pub fn parser_preserves_paragraph_source_blame_test() {
-  let assert Ok(#(_tree, lines)) = wl.assemble_input_lines("test/test1.wly")
+  let assert Ok(#(_tree, lines)) = wl.assemble_sources("test", test1_sources())
   lines
   |> wl.input_lines_to_writerlys()
   |> should.equal(
@@ -160,7 +237,8 @@ pub fn parser_preserves_paragraph_source_blame_test() {
 }
 
 pub fn parser_preserves_blame_across_assembled_files_test() {
-  let assert Ok(#(_tree, lines)) = wl.assemble_input_lines("test/testA")
+  let assert Ok(#(_tree, lines)) =
+    wl.assemble_sources("test/testA", test_a_sources())
   lines
   |> wl.input_lines_to_writerlys()
   |> should.equal(

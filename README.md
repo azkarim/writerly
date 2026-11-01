@@ -123,8 +123,12 @@ results with `writerlys_to_vxmls`.
 
 ### Multi-file documents
 
-`assemble_input_lines` accepts either a `.wly` file or a directory. A directory
-may use `__parent.wly` as its root file:
+`assemble_sources` assembles a document from a list of `SourceFile(path,
+contents)` values whose paths are relative to the document root. The package
+does no file I/O, so it runs on both the Erlang and JavaScript targets,
+including in the browser: the caller loads the sources from disk, an editor's
+in-memory project, or anywhere else. A single-file document is a one-element
+list. A multi-file document may use `__parent.wly` as its root file:
 
 ```text
 book/
@@ -142,28 +146,40 @@ Otherwise they are concatenated at their native level of indentation.
 Nested directories are assembled recursively.
 Files and directories whose names start with `#` are ignored. Only files
 ending in `.wly` are included; directory names need no special suffix.
-The input directory must contain at least one eligible `.wly` file directly
-inside it. If it contains only subdirectories, assembly returns `NoFilesFound`,
-even when those subdirectories contain `.wly` files.
+At least one eligible `.wly` file must sit directly at the root. If every
+eligible file is in a subdirectory, assembly returns `NoFilesFound`. Source
+paths use `/` separators and must not be empty, absolute, or contain empty,
+`.`, or `..` components (`InvalidSourcePath`), and each path may appear only
+once (`DuplicateSourcePath`). The order of the source list does not matter.
 
-Use `assemble_input_lines_with_path_selector` to select source paths with a
+Use `assemble_sources_with_path_selector` to select source paths with a
 `fn(String) -> Bool` predicate receiving relative file paths.
-Assembly returns `Result(#(DirTree, List(InputLine)), AssemblyError)`. The tree
-records the selected file layout; the input lines retain filenames and line
+Assembly returns `Result(#(DirTree, List(InputLine)), AssemblyError)`. The
+first argument names the root of the returned tree. The tree records the
+selected file layout; the input lines retain relative filenames and line
 numbers for later parsing and VXML processing:
 
 ```gleam
 import gleam/result
-import writerly
+import writerly.{SourceFile}
 
-pub fn assemble_lines(path: String) {
-  writerly.assemble_input_lines(path)
+pub fn assemble_lines() {
+  [
+    SourceFile("__parent.wly", "|> Book"),
+    SourceFile("01-introduction.wly", "Once upon a time."),
+  ]
+  |> writerly.assemble_sources("book", _)
   |> result.map(fn(assembled) {
     let #(_tree, lines) = assembled
     lines
   })
 }
 ```
+
+To assemble a file or directory on disk, read its `.wly` files into
+`SourceFile`s first, for example with
+[simplifile](https://hex.pm/packages/simplifile).
+`vxml_pipeline/writerly_defaults.read_writerly_sources` does exactly this.
 
 ### VXML representation
 
@@ -234,7 +250,7 @@ Parsing to a single node requires exactly one non-blank top-level node.
 | Convert VXML to Writerly | `vxml_to_writerly`, `vxmls_to_writerlys` |
 | Serialize to source strings | `writerly_to_string`, `writerlys_to_string` |
 | Serialize to provenance-carrying output lines | `writerly_to_output_lines`, `writerlys_to_output_lines` |
-| Assemble source files | `assemble_input_lines`, `assemble_input_lines_with_path_selector` |
+| Assemble source files | `assemble_sources`, `assemble_sources_with_path_selector` |
 | Render a diagnostic table | `writerly_debug_table` |
 
 Parsing, assembly, VXML-to-Writerly conversion, and serialization return

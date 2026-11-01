@@ -1,19 +1,18 @@
 name = "writerly"
-version = "0.6.0"
+version = "0.7.0"
 description = "Reference implementation of the Writerly white label markup language."
 licences = ["MIT"]
 repository = { type = "github", user = "vistuleB", repo = "writerly" }
 
 [dependencies]
 gleam_stdlib = ">= 0.34.0 and < 2.0.0"
-simplifile = ">= 2.3.0 and < 3.0.0"
 gleam_regexp = ">= 1.1.1 and < 2.0.0"
 gleam_time = ">= 1.4.0 and < 2.0.0"
 splitter = ">= 1.1.0 and < 2.0.0"
 filepath = ">= 1.1.2 and < 2.0.0"
 dirtree = ">= 1.0.2 and < 2.0.0"
 on = ">= 3.0.0 and < 4.0.0"
-vxml = ">= 2.0.0 and < 3.0.0"
+vxml = { path = "../vxml" }
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

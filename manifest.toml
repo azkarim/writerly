@@ -15,9 +15,8 @@ packages = [
   { name = "gleeunit", version = "1.11.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleeunit", source = "hex", outer_checksum = "EC31ABA74256AEA531EDF8169931D775BBB384FED0A8A1BDC4DD9354E3E21826" },
   { name = "glentities", version = "6.2.2", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "glentities", source = "hex", outer_checksum = "6B0666817910F2EA8196125554EA311DB8A86A33030EF0451F5EFD29C7264830" },
   { name = "on", version = "3.0.5", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "on", source = "hex", outer_checksum = "44AAC8991062248065ADFE322C475BA9672A1E3D73F8501A56E4DA41C34BB8CD" },
-  { name = "simplifile", version = "2.7.0", build_tools = ["gleam"], requirements = ["filepath", "gleam_stdlib"], otp_app = "simplifile", source = "hex", outer_checksum = "A2727627B063E87351934C7F7F008F2D1FDB16F6DE0B8C79F9E46459CFC9C164" },
   { name = "splitter", version = "1.2.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "splitter", source = "hex", outer_checksum = "3DFD6B6C49E61EDAF6F7B27A42054A17CFF6CA2135FF553D0CB61C234D281DD0" },
-  { name = "vxml", version = "2.0.0", build_tools = ["gleam"], requirements = ["gleam_regexp", "gleam_stdlib", "glentities", "on", "simplifile", "splitter", "xmlm"], otp_app = "vxml", source = "hex", outer_checksum = "7C8B8A1BA990DE5971A9C1689C80A3EC7A4B4C08607BFE447A69B196C5971F86" },
+  { name = "vxml", version = "3.0.0", build_tools = ["gleam"], requirements = ["gleam_regexp", "gleam_stdlib", "glentities", "on", "splitter", "xmlm"], source = "local", path = "../vxml" },
   { name = "xmlm", version = "1.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "xmlm", source = "hex", outer_checksum = "F23155B6F0B22CB8E09DAD41BB6B1CD036725FD0A80EE25B1D1B14138683A81D" },
 ]
 
@@ -29,6 +28,5 @@ gleam_stdlib = { version = ">= 0.34.0 and < 2.0.0" }
 gleam_time = { version = ">= 1.4.0 and < 2.0.0" }
 gleeunit = { version = ">= 1.0.0 and < 2.0.0" }
 on = { version = ">= 3.0.0 and < 4.0.0" }
-simplifile = { version = ">= 2.3.0 and < 3.0.0" }
 splitter = { version = ">= 1.1.0 and < 2.0.0" }
-vxml = { version = ">= 2.0.0 and < 3.0.0" }
+vxml = { path = "../vxml" }

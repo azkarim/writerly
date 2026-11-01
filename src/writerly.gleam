@@ -6,6 +6,7 @@
 //// blocks, and converts them to and from VXML.
 
 import dirtree.{type DirTree} as dt
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -14,7 +15,6 @@ import gleam/regexp.{type Regexp}
 import gleam/result
 import gleam/string.{inspect as ins}
 import on
-import simplifile
 import vxml.{type Attr, type Line, type VXML, Attr, Line, T, V}
 import vxml/blame.{type Blame, prepend_comment as pc} as bl
 import vxml/io_lines.{type InputLine, type OutputLine, InputLine, OutputLine} as io_l
@@ -57,11 +57,21 @@ pub type ParseError {
   MissingRoot(blame: Blame)
 }
 
+/// A Writerly source file to assemble, identified by its path relative to the
+/// root of the document, for example `"chapter1/__parent.wly"`.
+pub type SourceFile {
+  SourceFile(path: String, contents: String)
+}
+
 /// An error encountered while assembling Writerly source files.
 pub type AssemblyError {
-  ReadFileError(String)
-  ReadFileOrDirectoryError(String)
+  /// No eligible `.wly` file sits directly at the root.
   NoFilesFound(String)
+  /// A source path is empty, absolute, or contains an empty, `.`, or `..`
+  /// component.
+  InvalidSourcePath(String)
+  /// Two source files have the same path.
+  DuplicateSourcePath(String)
 }
 
 /// An error encountered while converting VXML to Writerly or serializing
@@ -176,7 +186,7 @@ fn parse_attribute_value(
 
 // The API covers five areas of responsibility:
 //
-//    1. assembling List(InputLine) from a filepath or dirpath
+//    1. assembling List(InputLine) from in-memory source files
 //    2. List(InputLine) -> Writerly (parsing)
 //    3. Writerly -> VXML
 //    4. VXML -> Writerly
@@ -187,9 +197,10 @@ fn parse_attribute_value(
 // ************************************************************
 // PART 1
 //
-// directory or filepath -> List(InputLine)   // Result
-// 
-// pub fn assemble_input_lines
+// List(SourceFile) -> List(InputLine)   // Result
+//
+// pub fn assemble_sources
+// pub fn assemble_sources_with_path_selector
 // ************************************************************
 
 fn file_is_not_commented(path: String) -> Bool {
@@ -223,10 +234,11 @@ fn shortname_for_blame(path: String, dirname: String) -> String {
 }
 
 fn input_lines_for_file_at_depth(
+  sources: Dict(String, String),
   dirname: String,
   path: String,
   depth: Int,
-) -> Result(List(InputLine), AssemblyError) {
+) -> List(InputLine) {
   let shortname = shortname_for_blame(path, dirname)
   case shortname == "" {
     True ->
@@ -240,23 +252,10 @@ fn input_lines_for_file_at_depth(
     False -> shortname
   }
 
-  case simplifile.read(path) {
-    Ok(string) -> {
-      Ok(io_l.string_to_input_lines(string, shortname, 4 * depth))
-    }
-    Error(_) -> {
-      Error(ReadFileError(path))
-    }
+  case dict.get(sources, shortname) {
+    Ok(contents) -> io_l.string_to_input_lines(contents, shortname, 4 * depth)
+    Error(_) -> panic as { "no source file for assembled path '" <> path <> "'" }
   }
-}
-
-fn path_2_dir_and_filename(path: String) -> #(String, String) {
-  let reversed_path = path |> string.reverse
-  let #(reversed_filename, reversed_dir) =
-    reversed_path
-    |> string.split_once("/")
-    |> result.unwrap(#(reversed_path, ""))
-  #(reversed_dir |> string.reverse, reversed_filename |> string.reverse)
 }
 
 fn dir_and_filename_2_path(dir: String, path: String) -> String {
@@ -273,69 +272,54 @@ fn drop_slash(s: String) {
   }
 }
 
-type AssemblyInputKind {
-  DirectoryInput
-  FileInput
-}
-
 fn is_direct_relative_path(path: String) -> Bool {
   !string.contains(path, "/")
 }
 
-fn get_dirname_and_relative_paths_of_uncommented_wly_in_dir(
-  dirpath_or_filepath: String,
-) -> Result(#(String, List(String)), AssemblyError) {
-  use #(dirname, fullpaths_including_dirname, input_kind) <- on.ok(
-    case simplifile.get_files(dirpath_or_filepath) {
-      Ok(files) -> {
-        Ok(#(dirpath_or_filepath |> drop_slash, files, DirectoryInput))
-      }
-      Error(simplifile.Enotdir) -> {
-        let #(dirname, filepath) =
-          dirpath_or_filepath |> path_2_dir_and_filename
-        Ok(#(dirname, [dir_and_filename_2_path(dirname, filepath)], FileInput))
-      }
-      Error(error) ->
-        Error(ReadFileOrDirectoryError(
-          "error accessing dirpath_or_filepath:"
-          <> dirpath_or_filepath
-          <> ", "
-          <> ins(error),
-        ))
-    },
+fn is_valid_source_path(path: String) -> Bool {
+  path
+  |> string.split("/")
+  |> list.all(fn(component) {
+    component != "" && component != "." && component != ".."
+  })
+}
+
+/// Checks the source paths and returns the eligible `.wly` paths, sorted.
+fn relative_paths_of_uncommented_wly(
+  root: String,
+  sources: List(SourceFile),
+) -> Result(List(String), AssemblyError) {
+  use paths <- on.ok(
+    list.try_fold(sources, [], fn(seen, source) {
+      use <- on.false_true(is_valid_source_path(source.path), fn() {
+        Error(InvalidSourcePath(source.path))
+      })
+      use <- on.true_false(list.contains(seen, source.path), fn() {
+        Error(DuplicateSourcePath(source.path))
+      })
+      Ok([source.path, ..seen])
+    }),
   )
 
-  assert !string.ends_with(dirname, "/")
-  let dirname_length = string.length(dirname)
   let relative_filepaths =
-    fullpaths_including_dirname
+    paths
     |> list.filter(string.ends_with(_, ".wly"))
     |> list.filter(file_is_not_commented)
-    |> list.map(fn(path) {
-      let path = string.drop_start(path, dirname_length)
-      assert string.starts_with(path, "/")
-      string.drop_start(path, 1)
-    })
+    |> list.sort(string.compare)
 
-  case input_kind {
-    DirectoryInput ->
-      case list.any(relative_filepaths, is_direct_relative_path) {
-        True -> Ok(#(dirname, relative_filepaths))
-        False ->
-          Error(NoFilesFound(
-            "no direct .wly files found in: " <> dirpath_or_filepath,
-          ))
-      }
-    FileInput -> Ok(#(dirname, relative_filepaths))
+  case list.any(relative_filepaths, is_direct_relative_path) {
+    True -> Ok(relative_filepaths)
+    False -> Error(NoFilesFound("no direct .wly files found in: " <> root))
   }
 }
 
 fn input_lines_for_dirtree_at_depth(
+  sources: Dict(String, String),
   original_dirname: String,
   acc: String,
   tree: DirTree,
   depth: Int,
-) -> Result(List(InputLine), AssemblyError) {
+) -> List(InputLine) {
   let added_depth = fn(prefixes: List(String), path: String) {
     list.fold(prefixes, 0, fn(acc, prefix) {
       case
@@ -365,6 +349,7 @@ fn input_lines_for_dirtree_at_depth(
     dt.Filepath(path) -> {
       assert string.ends_with(path, ".wly")
       input_lines_for_file_at_depth(
+        sources,
         original_dirname,
         dir_and_filename_2_path(acc, path),
         depth,
@@ -373,43 +358,45 @@ fn input_lines_for_dirtree_at_depth(
 
     dt.Dirpath(path, contents) -> {
       let prefixes = parent_prefixes(contents)
-      use list_of_lists <- on.ok(
-        list.try_map(contents, fn(subtree) {
-          let depth = depth + added_depth(prefixes, subtree.name)
-          input_lines_for_dirtree_at_depth(
-            original_dirname,
-            dir_and_filename_2_path(acc, path),
-            subtree,
-            depth,
-          )
-        }),
-      )
-      list_of_lists
-      |> list.flatten
-      |> Ok
+      contents
+      |> list.flat_map(fn(subtree) {
+        let depth = depth + added_depth(prefixes, subtree.name)
+        input_lines_for_dirtree_at_depth(
+          sources,
+          original_dirname,
+          dir_and_filename_2_path(acc, path),
+          subtree,
+          depth,
+        )
+      })
     }
   }
 }
 
-/// Assembles selected `.wly` files from a file or directory.
+/// Assembles selected `.wly` files from in-memory sources.
 ///
-/// The selector receives paths relative to the input directory. A selected
-/// file is included along with any `__parent.wly` files needed to contain it.
-/// The returned directory tree records the selected layout; the input lines
-/// retain their relative source paths and are indented according to that tree.
-pub fn assemble_input_lines_with_path_selector(
-  dirpath_or_filepath: String,
+/// Source paths are relative to the document root and use `/` separators;
+/// `root` names the root of the returned `DirTree` and is not part of any
+/// blame path. Only paths ending in `.wly` whose components do not begin with
+/// `#` are assembled, and at least one of them must sit directly at the root.
+///
+/// The selector receives the relative source paths. A selected file is
+/// included along with any `__parent.wly` files needed to contain it. The
+/// returned directory tree records the selected layout; the input lines retain
+/// their relative source paths and are indented according to that tree.
+pub fn assemble_sources_with_path_selector(
+  root: String,
+  sources: List(SourceFile),
   path_selector: fn(String) -> Bool,
 ) -> Result(#(DirTree, List(InputLine)), AssemblyError) {
-  use #(dirname, paths) <- on.ok(
-    get_dirname_and_relative_paths_of_uncommented_wly_in_dir(
-      dirpath_or_filepath,
-    ),
-  )
+  let dirname = drop_slash(root)
 
-  use _, _ <- on.empty_nonempty(paths, fn() {
-    Error(NoFilesFound("no files found in: " <> dirpath_or_filepath))
-  })
+  use paths <- on.ok(relative_paths_of_uncommented_wly(root, sources))
+
+  let contents =
+    sources
+    |> list.map(fn(source) { #(source.path, source.contents) })
+    |> dict.from_list
 
   let paths =
     paths
@@ -432,19 +419,20 @@ pub fn assemble_input_lines_with_path_selector(
       string.compare(t1.name |> drop_suffix, t2.name |> drop_suffix)
     })
 
-  use lines <- on.ok(input_lines_for_dirtree_at_depth(dirname, "", tree, 0))
+  let lines = input_lines_for_dirtree_at_depth(contents, dirname, "", tree, 0)
 
   Ok(#(tree, lines))
 }
 
-/// Assembles every eligible `.wly` file from a file or directory.
+/// Assembles every eligible `.wly` file from in-memory sources.
 ///
-/// Files and directories with a path component beginning with `#` are ignored.
-/// See `assemble_input_lines_with_path_selector` for selective assembly.
-pub fn assemble_input_lines(
-  dirpath_or_filepath: String,
+/// See `assemble_sources_with_path_selector` for the rules and for selective
+/// assembly.
+pub fn assemble_sources(
+  root: String,
+  sources: List(SourceFile),
 ) -> Result(#(DirTree, List(InputLine)), AssemblyError) {
-  assemble_input_lines_with_path_selector(dirpath_or_filepath, fn(_) { True })
+  assemble_sources_with_path_selector(root, sources, fn(_) { True })
 }
 
 // ************************************************************
