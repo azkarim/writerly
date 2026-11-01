@@ -563,36 +563,51 @@ fn parse_attrs_at_indent(
   head: InputLines,
   rgxs: OurRegexes,
   acc: List(Attr),
-) -> Result(#(List(Attr), Encounter, InputLines), ParseError) {
+  errors: List(ParseError),
+) -> #(List(Attr), Encounter, InputLines, List(ParseError)) {
   let #(encounter, rest) = input_lines_encounter(indent, head)
 
   case encounter {
     EncounteredCommentLine(blame, suffix) -> {
       let #(spaces, val) =
         suffix |> string.drop_start(2) |> split_leading_spaces(0)
-      case spaces > maximum_leading_attribute_spaces {
-        True ->
-          Error(ExcessiveLeadingAttributeWhitespace(
+      let errors = case spaces > maximum_leading_attribute_spaces {
+        True -> [
+          ExcessiveLeadingAttributeWhitespace(
             blame,
             maximum_leading_attribute_spaces,
             spaces,
-          ))
-        False -> {
-          let attr = Attr(blame, make_commented_attribute_key(spaces), val)
-          parse_attrs_at_indent(indent, rest, rgxs, [attr, ..acc])
-        }
+          ),
+          ..errors
+        ]
+        False -> errors
       }
+      let spaces = int.min(spaces, maximum_leading_attribute_spaces)
+      let attr = Attr(blame, make_commented_attribute_key(spaces), val)
+      parse_attrs_at_indent(indent, rest, rgxs, [attr, ..acc], errors)
     }
 
     EncounteredTextLine(blame, suffix) ->
       case text_line_attr(blame, suffix, rgxs) {
-        Error(e) -> Error(e)
-        Ok(Some(attr)) ->
-          parse_attrs_at_indent(indent, rest, rgxs, [attr, ..acc])
-        Ok(None) -> Ok(#(list.reverse(acc), encounter, rest))
+        #(Some(attr), error) ->
+          parse_attrs_at_indent(
+            indent,
+            rest,
+            rgxs,
+            [attr, ..acc],
+            prepend_option(errors, error),
+          )
+        #(None, _) -> #(list.reverse(acc), encounter, rest, errors)
       }
 
-    _ -> Ok(#(list.reverse(acc), encounter, rest))
+    _ -> #(list.reverse(acc), encounter, rest, errors)
+  }
+}
+
+fn prepend_option(list: List(a), item: Option(a)) -> List(a) {
+  case item {
+    Some(item) -> [item, ..list]
+    None -> list
   }
 }
 
@@ -601,24 +616,37 @@ fn text_line_attr(
   blame: Blame,
   suffix: String,
   rgxs: OurRegexes,
-) -> Result(Option(Attr), ParseError) {
+) -> #(Option(Attr), Option(ParseError)) {
   assert suffix != ""
   assert !string.starts_with(suffix, "!!")
   assert !string.starts_with(suffix, "|>")
 
   use #(key, val) <- on.error_ok(suffix |> string.split_once("="), fn(_) {
-    Ok(None)
+    #(None, None)
   })
 
   use <- on.true_false(
     key == ""
       || string.contains(key, " ")
       || !regexp.check(rgxs.is_valid_key, key),
-    fn() { Ok(None) },
+    fn() { #(None, None) },
   )
 
-  use val <- on.ok(parse_attribute_value(blame, val))
-  Ok(Some(Attr(blame, key, val)))
+  let #(val, error) = parse_attribute_value_recovering(blame, val)
+  #(Some(Attr(blame, key, val)), error)
+}
+
+fn parse_attribute_value_recovering(
+  blame: Blame,
+  raw_value: String,
+) -> #(String, Option(ParseError)) {
+  case parse_attribute_value(blame, raw_value) {
+    Ok(value) -> #(value, None)
+    Error(error) -> #(
+      raw_value |> string.trim_start |> trim_trailing_attribute_whitespace,
+      Some(error),
+    )
+  }
 }
 
 // Splits the trailing blank lines off `acc`, which holds siblings in reverse.
@@ -639,59 +667,121 @@ fn finish_siblings(
   acc: List(Writerly),
   encounter: Encounter,
   rest: InputLines,
-) -> #(List(Writerly), List(Writerly), Encounter, InputLines) {
+  errors: List(ParseError),
+) -> #(List(Writerly), List(Writerly), Encounter, InputLines, List(ParseError)) {
   let #(blanks, siblings) = split_trailing_blank_lines(acc, [])
-  #(list.reverse(siblings), blanks, encounter, rest)
+  #(list.reverse(siblings), blanks, encounter, rest, errors)
+}
+
+// Moves a mis-indented line back by `by` spaces, together with the following
+// lines indented at least as deeply, so one mistake is reported once.
+fn shift_block(head: InputLines, by: Int) -> InputLines {
+  case head {
+    [] -> []
+    [first, ..rest] ->
+      shift_block_loop(rest, first.indent, by, [
+        InputLine(..first, indent: first.indent - by),
+      ])
+  }
+}
+
+fn shift_block_loop(
+  lines: InputLines,
+  from_indent: Int,
+  by: Int,
+  acc: InputLines,
+) -> InputLines {
+  case lines {
+    [InputLine(suffix: "", ..) as blank, ..rest] ->
+      shift_block_loop(rest, from_indent, by, [blank, ..acc])
+    [line, ..rest] if line.indent >= from_indent ->
+      shift_block_loop(rest, from_indent, by, [
+        InputLine(..line, indent: line.indent - by),
+        ..acc
+      ])
+    _ -> list.fold(acc, lines, fn(lines, line) { [line, ..lines] })
+  }
 }
 
 /// Parses the siblings at `indent`, up to a line of lower indentation or the
 /// end of input. Returns the siblings without their trailing blank lines, the
-/// trailing blank lines (which the caller hoists out of a closing tag), and
-/// the encounter and input that stopped the run.
+/// trailing blank lines (which the caller hoists out of a closing tag), the
+/// encounter and input that stopped the run, and the errors found so far,
+/// most recent first.
 ///
 /// `acc` holds the siblings parsed so far, most recent first. A child tag's
 /// trailing blank lines become ordinary siblings after the tag here, and
 /// trailing blank lines at the end of the run are split off again by
-/// `finish_siblings`.
+/// `finish_siblings`. After an error the parser repairs the spot and goes on,
+/// so later errors are found too.
 fn parse_writerlys_at_indent_from_encounter(
   indent: Int,
   rest: InputLines,
   rgxs: OurRegexes,
   encounter: Encounter,
   acc: List(Writerly),
-) -> Result(
-  #(List(Writerly), List(Writerly), Encounter, InputLines),
-  ParseError,
-) {
+  errors: List(ParseError),
+) -> #(List(Writerly), List(Writerly), Encounter, InputLines, List(ParseError)) {
   case encounter {
-    EncounteredFileEnd -> Ok(finish_siblings(acc, EncounteredFileEnd, []))
+    EncounteredFileEnd -> finish_siblings(acc, EncounteredFileEnd, [], errors)
 
     EncounteredBlankLine(blame, _) -> {
       let #(encounter, rest) = input_lines_encounter(indent, rest)
-      parse_writerlys_at_indent_from_encounter(indent, rest, rgxs, encounter, [
-        BlankLine(blame),
-        ..acc
-      ])
+      parse_writerlys_at_indent_from_encounter(
+        indent,
+        rest,
+        rgxs,
+        encounter,
+        [BlankLine(blame), ..acc],
+        errors,
+      )
     }
 
-    EncounteredNonMod4Indent(blame, _, suffix) -> {
-      Error(IndentationNotMultipleOfFour(blame, suffix))
+    EncounteredNonMod4Indent(blame, line_indent, suffix) -> {
+      let target = int.min(line_indent / 4 * 4, indent)
+      let head =
+        shift_block([InputLine(blame, line_indent, suffix), ..rest], {
+          line_indent - target
+        })
+      let #(encounter, rest) = input_lines_encounter(indent, head)
+      parse_writerlys_at_indent_from_encounter(
+        indent,
+        rest,
+        rgxs,
+        encounter,
+        acc,
+        [IndentationNotMultipleOfFour(blame, suffix), ..errors],
+      )
     }
 
     EncounteredHigherIndent(blame, _, suffix, indent, higher_indent) -> {
-      Error(IndentationTooLarge(
-        blame,
-        "expected: " <> ins(indent),
-        "found: " <> ins(higher_indent),
-        "line: '" <> suffix <> "'",
-      ))
+      let error =
+        IndentationTooLarge(
+          blame,
+          "expected: " <> ins(indent),
+          "found: " <> ins(higher_indent),
+          "line: '" <> suffix <> "'",
+        )
+      let head =
+        shift_block([InputLine(blame, higher_indent, suffix), ..rest], {
+          higher_indent - indent
+        })
+      let #(encounter, rest) = input_lines_encounter(indent, head)
+      parse_writerlys_at_indent_from_encounter(
+        indent,
+        rest,
+        rgxs,
+        encounter,
+        acc,
+        [error, ..errors],
+      )
     }
 
     EncounteredLowerIndent(blame, suffix_indent, suffix) -> {
       assert suffix_indent <= indent
       assert suffix != ""
       case suffix_indent < indent {
-        True -> Ok(finish_siblings(acc, encounter, rest))
+        True -> finish_siblings(acc, encounter, rest, errors)
         False -> {
           let encounter = nonempty_suffix_encounter(blame, suffix)
           parse_writerlys_at_indent_from_encounter(
@@ -700,6 +790,7 @@ fn parse_writerlys_at_indent_from_encounter(
             rgxs,
             encounter,
             acc,
+            errors,
           )
         }
       }
@@ -709,73 +800,75 @@ fn parse_writerlys_at_indent_from_encounter(
       let line = Line(blame |> bl.advance(2), suffix |> string.drop_start(2))
       let #(lines, encounter, rest) =
         parse_comment_lines_at_indent(indent, rest, [line])
-      parse_writerlys_at_indent_from_encounter(indent, rest, rgxs, encounter, [
-        Comment(blame, lines),
-        ..acc
-      ])
+      parse_writerlys_at_indent_from_encounter(
+        indent,
+        rest,
+        rgxs,
+        encounter,
+        [Comment(blame, lines), ..acc],
+        errors,
+      )
     }
 
     EncounteredTextLine(blame, suffix) -> {
       let line = drop_text_line_escape(blame, suffix, rgxs)
       let #(lines, encounter, rest) =
         parse_text_lines_at_indent(indent, rest, rgxs, [line])
-      parse_writerlys_at_indent_from_encounter(indent, rest, rgxs, encounter, [
-        Paragraph(blame, lines),
-        ..acc
-      ])
+      parse_writerlys_at_indent_from_encounter(
+        indent,
+        rest,
+        rgxs,
+        encounter,
+        [Paragraph(blame, lines), ..acc],
+        errors,
+      )
     }
 
     EncounteredTagLine(blame, suffix) -> {
       let tag = suffix |> string.drop_start(2) |> string.trim
-      case regexp.check(rgxs.is_valid_tag, tag) {
-        False -> Error(BadTag(blame, tag))
-        True ->
-          case parse_tag_contents(indent, rest, rgxs) {
-            Error(e) -> Error(e)
-            Ok(#(attrs, children, blanks, encounter, rest)) -> {
-              let acc =
-                list.fold(
-                  blanks,
-                  [Tag(blame, tag, attrs, children), ..acc],
-                  fn(acc, blank) { [blank, ..acc] },
-                )
-              parse_writerlys_at_indent_from_encounter(
-                indent,
-                rest,
-                rgxs,
-                encounter,
-                acc,
-              )
-            }
-          }
+      let errors = case regexp.check(rgxs.is_valid_tag, tag) {
+        True -> errors
+        False -> [BadTag(blame, tag), ..errors]
       }
+      let #(attrs, children, blanks, encounter, rest, errors) =
+        parse_tag_contents(indent, rest, rgxs, errors)
+      let acc =
+        list.fold(
+          blanks,
+          [Tag(blame, tag, attrs, children), ..acc],
+          fn(acc, blank) { [blank, ..acc] },
+        )
+      parse_writerlys_at_indent_from_encounter(
+        indent,
+        rest,
+        rgxs,
+        encounter,
+        acc,
+        errors,
+      )
     }
 
     EncounteredCodeFence(blame, suffix) -> {
-      let code_block = {
-        use attrs <- on.ok(code_block_info_to_attrs(
+      let #(attrs, info_errors) =
+        code_block_info_to_attrs(
           blame |> bl.advance(3),
           suffix |> string.drop_start(3),
           rgxs,
-        ))
-        use #(lines, rest) <- on.ok(
-          parse_code_block_at_indent(indent, rest, blame, rgxs, []),
         )
-        Ok(#(CodeBlock(blame, attrs, lines), rest))
-      }
-      case code_block {
-        Error(e) -> Error(e)
-        Ok(#(writerly, rest)) -> {
-          let #(encounter, rest) = input_lines_encounter(indent, rest)
-          parse_writerlys_at_indent_from_encounter(
-            indent,
-            rest,
-            rgxs,
-            encounter,
-            [writerly, ..acc],
-          )
-        }
-      }
+      let #(lines, rest, close_error) =
+        parse_code_block_at_indent(indent, rest, blame, rgxs, [])
+      let errors =
+        list.fold(info_errors, errors, fn(errors, error) { [error, ..errors] })
+        |> prepend_option(close_error)
+      let #(encounter, rest) = input_lines_encounter(indent, rest)
+      parse_writerlys_at_indent_from_encounter(
+        indent,
+        rest,
+        rgxs,
+        encounter,
+        [CodeBlock(blame, attrs, lines), ..acc],
+        errors,
+      )
     }
   }
 }
@@ -786,34 +879,40 @@ fn parse_tag_contents(
   indent: Int,
   rest: InputLines,
   rgxs: OurRegexes,
-) -> Result(
-  #(List(Attr), List(Writerly), List(Writerly), Encounter, InputLines),
-  ParseError,
+  errors: List(ParseError),
+) -> #(
+  List(Attr),
+  List(Writerly),
+  List(Writerly),
+  Encounter,
+  InputLines,
+  List(ParseError),
 ) {
-  use #(attrs, encounter, rest) <- on.ok(
-    parse_attrs_at_indent(indent + 4, rest, rgxs, []),
-  )
-  use #(children, blanks, encounter, rest) <- on.ok(
+  let #(attrs, encounter, rest, errors) =
+    parse_attrs_at_indent(indent + 4, rest, rgxs, [], errors)
+  let #(children, blanks, encounter, rest, errors) =
     parse_writerlys_at_indent_from_encounter(
       indent + 4,
       rest,
       rgxs,
       encounter,
       [],
-    ),
-  )
-  Ok(#(attrs, children, blanks, encounter, rest))
+      errors,
+    )
+  #(attrs, children, blanks, encounter, rest, errors)
 }
 
+// An unclosed block ends where its indentation ends; the line that ended it
+// is left for the caller.
 fn parse_code_block_at_indent(
   indent: Int,
   head: InputLines,
   initial_blame: Blame,
   rgxs: OurRegexes,
   acc: List(Line),
-) -> Result(#(List(Line), InputLines), ParseError) {
+) -> #(List(Line), InputLines, Option(ParseError)) {
   case head {
-    [] -> Error(CodeBlockNotClosed(initial_blame))
+    [] -> #(list.reverse(acc), [], Some(CodeBlockNotClosed(initial_blame)))
     [InputLine(blame, first_indent, suffix), ..rest] ->
       case code_block_line(indent, blame, first_indent, suffix, rgxs) {
         CodeBlockContent(line) ->
@@ -821,14 +920,21 @@ fn parse_code_block_at_indent(
             line,
             ..acc
           ])
-        CodeBlockClose("") -> Ok(#(list.reverse(acc), rest))
-        CodeBlockClose(annotation) ->
-          Error(CodeBlockUnwantedAnnotationAtClose(
+        CodeBlockClose("") -> #(list.reverse(acc), rest, None)
+        CodeBlockClose(annotation) -> #(
+          list.reverse(acc),
+          rest,
+          Some(CodeBlockUnwantedAnnotationAtClose(
             blame,
             initial_blame,
             annotation,
-          ))
-        CodeBlockUnclosed -> Error(CodeBlockNotClosed(initial_blame))
+          )),
+        )
+        CodeBlockUnclosed -> #(
+          list.reverse(acc),
+          head,
+          Some(CodeBlockNotClosed(initial_blame)),
+        )
       }
   }
 }
@@ -904,17 +1010,21 @@ fn code_block_info_to_attrs(
   blame: Blame,
   info: String,
   rgxs: OurRegexes,
-) -> Result(List(Attr), ParseError) {
+) -> #(List(Attr), List(ParseError)) {
   let info = info |> string.trim_end()
 
-  use <- on.true_false(info == "", fn() { Ok([]) })
+  use <- on.true_false(info == "", fn() { #([], []) })
 
   use <- on.true_false(info |> string.starts_with(" "), fn() {
-    Error(CodeBlockInfoStartsWithSpace(blame, info))
+    let trimmed = string.trim_start(info)
+    let spaces = string.length(info) - string.length(trimmed)
+    let #(attrs, errors) =
+      code_block_info_to_attrs(blame |> bl.advance(spaces), trimmed, rgxs)
+    #(attrs, [CodeBlockInfoStartsWithSpace(blame, info), ..errors])
   })
 
   use <- on.false_true(info |> string.contains("&"), fn() {
-    Ok([Attr(blame, code_block_info_string_prefix_attribute_key, info)])
+    #([Attr(blame, code_block_info_string_prefix_attribute_key, info)], [])
   })
 
   let pieces = regexp.split(rgxs.unescaped_ampersand, info)
@@ -968,39 +1078,45 @@ fn code_block_info_to_attrs(
   let assert [info, ..keyvals] = keyvals
   let info = Attr(info.0, code_block_info_string_prefix_attribute_key, info.1)
 
-  use keyvals <- on.ok(
-    list.try_map(keyvals, fn(kv) {
+  let #(keyvals, errors) =
+    list.fold(keyvals, #([], []), fn(acc, kv) {
+      let #(attrs, errors) = acc
       let #(blame, kv) = kv
       let #(key, val) =
         string.split_once(kv, "=")
         |> result.unwrap(#(kv, ""))
       let key = string.trim(key)
-      use val <- on.ok(parse_attribute_value(blame, val))
+      let #(val, value_error) = parse_attribute_value_recovering(blame, val)
+      let errors = prepend_option(errors, value_error)
       case regexp.check(rgxs.is_valid_key, key) {
-        False -> Error(BadKey(blame, key))
-        True -> Ok(Attr(blame, key, val))
+        False -> #(attrs, [BadKey(blame, key), ..errors])
+        True -> #([Attr(blame, key, val), ..attrs], errors)
       }
-    }),
-  )
+    })
+  let keyvals = list.reverse(keyvals)
 
   let attrs = case info.val {
     "" -> keyvals
     _ -> [info, ..keyvals]
   }
 
-  Ok(attrs)
+  #(attrs, list.reverse(errors))
 }
 
 fn parse_writerlys_at_indent(
   indent: Int,
   head: InputLines,
   rgxs: OurRegexes,
-) -> Result(
-  #(List(Writerly), List(Writerly), Encounter, InputLines),
-  ParseError,
-) {
+) -> #(List(Writerly), List(Writerly), Encounter, InputLines, List(ParseError)) {
   let #(encounter, rest) = input_lines_encounter(indent, head)
-  parse_writerlys_at_indent_from_encounter(indent, rest, rgxs, encounter, [])
+  parse_writerlys_at_indent_from_encounter(
+    indent,
+    rest,
+    rgxs,
+    encounter,
+    [],
+    [],
+  )
 }
 
 type OurRegexes {
@@ -1048,9 +1164,27 @@ fn our_regexes() -> OurRegexes {
 pub fn input_lines_to_writerlys(
   lines: InputLines,
 ) -> Result(List(Writerly), ParseError) {
+  case input_lines_to_writerlys_with_errors(lines) {
+    #(writerlys, []) -> Ok(writerlys)
+    #(_, [first, ..]) -> Error(first)
+  }
+}
+
+/// Parses input lines into zero or more top-level Writerly nodes, recovering
+/// from errors instead of stopping at the first one.
+///
+/// Returns the nodes and every error, in the order they were found. After an
+/// error the parser repairs that spot (a mis-indented line moves back with its
+/// block, an invalid tag still parses as a tag, an unclosed code block ends
+/// where its indentation does) so that later errors are found too. The nodes
+/// are only meaningful when there are no errors. With no errors, the nodes
+/// are the same as `input_lines_to_writerlys` returns.
+pub fn input_lines_to_writerlys_with_errors(
+  lines: InputLines,
+) -> #(List(Writerly), List(ParseError)) {
   let rgxs = our_regexes()
-  use #(writerlys, _, _, _) <- on.ok(parse_writerlys_at_indent(0, lines, rgxs))
-  Ok(writerlys)
+  let #(writerlys, _, _, _, errors) = parse_writerlys_at_indent(0, lines, rgxs)
+  #(writerlys, list.reverse(errors))
 }
 
 fn is_not_blank_line(w: Writerly) -> Bool {
@@ -1086,6 +1220,17 @@ pub fn string_to_writerlys(
   source
   |> io_l.string_to_input_lines(filename, 0)
   |> input_lines_to_writerlys
+}
+
+/// Parses a source string into zero or more top-level Writerly nodes and every
+/// error found. See `input_lines_to_writerlys_with_errors`.
+pub fn string_to_writerlys_with_errors(
+  source: String,
+  filename: String,
+) -> #(List(Writerly), List(ParseError)) {
+  source
+  |> io_l.string_to_input_lines(filename, 0)
+  |> input_lines_to_writerlys_with_errors
 }
 
 /// Parses a source string containing exactly one non-blank top-level node.

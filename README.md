@@ -121,6 +121,25 @@ The lower-level `string_to_writerlys` and `input_lines_to_writerlys` functions
 are available when a source contains multiple top-level nodes; convert their
 results with `writerlys_to_vxmls`.
 
+### Collecting every error
+
+The parsing functions above stop at the first error. Editors and other tools
+that want to report all problems at once can use
+`string_to_writerlys_with_errors` or `input_lines_to_writerlys_with_errors`,
+which return the parsed nodes together with every `ParseError`, in the order
+they were found:
+
+```gleam
+let #(_nodes, errors) = writerly.string_to_writerlys_with_errors(source, "doc.wly")
+```
+
+After an error the parser repairs that spot and continues: a mis-indented line
+moves back to the nearest valid level together with its block, an invalid tag
+name still parses as a tag, and an unclosed code block ends where its
+indentation ends. One mistake is therefore reported once rather than
+cascading. The nodes are only meaningful when the error list is empty; then
+they are the same as `string_to_writerlys` returns.
+
 ### Multi-file documents
 
 `assemble_sources` assembles a document from a list of `SourceFile(path,
@@ -244,6 +263,7 @@ Parsing to a single node requires exactly one non-blank top-level node.
 | Operation | Functions |
 |---|---|
 | Parse source strings | `string_to_writerly`, `string_to_writerlys` |
+| Parse and collect every error | `string_to_writerlys_with_errors`, `input_lines_to_writerlys_with_errors` |
 | Parse source lines | `input_lines_to_writerly`, `input_lines_to_writerlys` |
 | Parse directly to one VXML root | `input_lines_to_vxml` |
 | Convert Writerly to VXML | `writerly_to_vxml`, `writerlys_to_vxmls` |

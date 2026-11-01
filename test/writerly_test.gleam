@@ -646,3 +646,77 @@ pub fn parser_handles_long_code_block_test() {
     wl.string_to_writerly(source, "wide.wly")
   list.length(lines) |> should.equal(wide)
 }
+
+fn error_summary(source: String) -> List(#(String, Int, Int)) {
+  let #(_, errors) = wl.string_to_writerlys_with_errors(source, "doc.wly")
+  list.map(errors, fn(error) {
+    let assert Src(line_no: line, char_no: column, ..) = error.blame
+    let kind = case error {
+      wl.BadTag(..) -> "BadTag"
+      wl.BadKey(..) -> "BadKey"
+      wl.IndentationTooLarge(..) -> "IndentationTooLarge"
+      wl.IndentationNotMultipleOfFour(..) -> "IndentationNotMultipleOfFour"
+      wl.CodeBlockInfoStartsWithSpace(..) -> "CodeBlockInfoStartsWithSpace"
+      wl.CodeBlockNotClosed(..) -> "CodeBlockNotClosed"
+      wl.CodeBlockUnwantedAnnotationAtClose(..) ->
+        "CodeBlockUnwantedAnnotationAtClose"
+      wl.ExcessiveLeadingAttributeWhitespace(..) ->
+        "ExcessiveLeadingAttributeWhitespace"
+      wl.NonUniqueRoot(..) -> "NonUniqueRoot"
+      wl.MissingRoot(..) -> "MissingRoot"
+    }
+    #(kind, line, column)
+  })
+}
+
+pub fn with_errors_matches_the_plain_parser_on_valid_input_test() {
+  let source =
+    "|> Book\n    title=One\n\n    A paragraph.\n\n    ```gleam\n    x\n    ```"
+  let assert Ok(writerlys) = wl.string_to_writerlys(source, "doc.wly")
+  wl.string_to_writerlys_with_errors(source, "doc.wly")
+  |> should.equal(#(writerlys, []))
+}
+
+pub fn with_errors_reports_every_independent_error_in_order_test() {
+  "|> Book\n      bad two\n    |> My Tag\n        fine\n    ```\n    code"
+  |> error_summary
+  |> should.equal([
+    #("IndentationNotMultipleOfFour", 2, 7),
+    #("BadTag", 3, 5),
+    #("CodeBlockNotClosed", 5, 5),
+  ])
+}
+
+pub fn with_errors_moves_a_too_deep_block_back_as_one_error_test() {
+  "|> Book\n            |> A\n                child\n                more\n    sibling"
+  |> error_summary
+  |> should.equal([#("IndentationTooLarge", 2, 13)])
+}
+
+pub fn with_errors_moves_a_misaligned_block_back_as_one_error_test() {
+  "|> Book\n      |> A\n          child\n          more\n    sibling"
+  |> error_summary
+  |> should.equal([#("IndentationNotMultipleOfFour", 2, 7)])
+}
+
+pub fn with_errors_ends_an_unclosed_code_block_at_its_indentation_test() {
+  "|> Book\n    |> A\n        ```\n        code\n    |> B\n        |>"
+  |> error_summary
+  |> should.equal([#("CodeBlockNotClosed", 3, 9), #("BadTag", 6, 9)])
+}
+
+pub fn with_errors_keeps_going_after_code_block_and_attribute_errors_test() {
+  let spaces = string.repeat(" ", 101)
+  {
+    "|> Book\n    k="
+    <> spaces
+    <> "v\n    ``` js\n    x\n    ``` tail\n    ```js&bad key=1\n    y\n    ```"
+  }
+  |> error_summary
+  |> should.equal([
+    #("ExcessiveLeadingAttributeWhitespace", 2, 5),
+    #("CodeBlockInfoStartsWithSpace", 3, 8),
+    #("CodeBlockUnwantedAnnotationAtClose", 5, 5),
+    #("BadKey", 6, 11),
+  ])
+}

@@ -2,6 +2,14 @@
 
 ## 0.7.0 — Unreleased
 
+- Add `input_lines_to_writerlys_with_errors` and
+  `string_to_writerlys_with_errors`, which recover from parse errors and return
+  every error in the order found, together with the parsed nodes. A
+  mis-indented line moves back with its block, an invalid tag still parses as a
+  tag, and an unclosed code block ends where its indentation ends, so one
+  mistake is reported once. `input_lines_to_writerlys` is now built on them and
+  returns the same first error as before (a differential test of 80,000
+  documents matched the previous parser exactly).
 - **Breaking:** Remove all file access so the package is target- and
   host-agnostic, and usable from the browser on the JavaScript target.
   `simplifile` is no longer a dependency, and no generated JavaScript module
