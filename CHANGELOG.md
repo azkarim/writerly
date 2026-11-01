@@ -20,6 +20,13 @@
 - `#` commenting now applies to path components below the root only. Before,
   a root directory path with a component starting with `#` excluded every file.
 - A source list's order no longer affects the result.
+- Fix stack overflows on JavaScript for long documents. The parser recursed
+  once per sibling node, text line, comment line, attribute, and code-block
+  line, and overflowed at about 880 sibling tags in browsers (831 in Node).
+  The parsing loops now compile to `while` loops, so stack depth follows
+  nesting only; 200,000 siblings or lines parse, and parsing is about 20%
+  faster. Results and errors are unchanged: a differential test of 60,000
+  random documents matched the previous parser exactly.
 
 **Migration:** read the files yourself, or on Erlang use
 `vxml_pipeline/writerly_defaults.read_writerly_sources(path)`, which returns

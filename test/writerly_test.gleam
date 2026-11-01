@@ -586,3 +586,63 @@ pub fn latex_alignment_example_round_trips_without_text_or_indentation_changes_t
     wl.string_to_writerly(serialized, "latex-example.wly")
   assert_latex_alignment_contents(reparsed)
 }
+
+// Stack safety: on JavaScript, parsing used one stack frame per sibling and
+// per line and overflowed Node at under 1,000 sibling tags (and browsers
+// soon after). Each shape here overflowed before the parser loops were made
+// tail-recursive; stack depth now follows nesting only.
+
+const wide = 20_000
+
+fn indices() -> List(Int) {
+  list.repeat(Nil, wide) |> list.index_map(fn(_, i) { i + 1 })
+}
+
+fn repeated_lines(line: fn(Int) -> String) -> String {
+  indices()
+  |> list.map(line)
+  |> string.join("\n")
+}
+
+fn assert_parses_wide_document(body: String, expected_children: Int) {
+  let assert Ok(root) = wl.string_to_writerly("|> Book\n" <> body, "wide.wly")
+  let assert wl.Tag(children: children, ..) = root
+  list.length(children) |> should.equal(expected_children)
+  let assert V(children: vxml_children, ..) = wl.writerly_to_vxml(root)
+  list.length(vxml_children) |> should.equal(expected_children)
+}
+
+pub fn parser_handles_many_sibling_tags_test() {
+  repeated_lines(fn(i) { "    |> P\n        x" <> string.inspect(i) })
+  |> assert_parses_wide_document(wide)
+}
+
+pub fn parser_handles_long_paragraph_test() {
+  repeated_lines(fn(i) { "    line " <> string.inspect(i) })
+  |> assert_parses_wide_document(1)
+}
+
+pub fn parser_handles_many_blank_lines_and_comments_test() {
+  repeated_lines(fn(i) { "    p" <> string.inspect(i) <> "\n\n    !! c" })
+  |> assert_parses_wide_document(3 * wide)
+}
+
+pub fn parser_handles_many_attributes_test() {
+  let assert Ok(wl.Tag(attrs: attrs, ..)) =
+    wl.string_to_writerly(
+      "|> Book\n"
+        <> repeated_lines(fn(i) { "    a" <> string.inspect(i) <> "=v" }),
+      "wide.wly",
+    )
+  list.length(attrs) |> should.equal(wide)
+}
+
+pub fn parser_handles_long_code_block_test() {
+  let source =
+    "|> Book\n    ```\n"
+    <> repeated_lines(fn(i) { "    code " <> string.inspect(i) })
+    <> "\n    ```"
+  let assert Ok(wl.Tag(children: [wl.CodeBlock(lines: lines, ..)], ..)) =
+    wl.string_to_writerly(source, "wide.wly")
+  list.length(lines) |> should.equal(wide)
+}
